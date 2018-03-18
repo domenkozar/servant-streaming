@@ -8,6 +8,7 @@ import           Control.Monad.Trans.Resource               (ResourceT,
                                                              InternalState,
                                                              createInternalState,
                                                              closeInternalState,
+                                                             getInternalState,
                                                              runInternalState)
 import qualified Data.ByteString                            as BS
 import           Data.Maybe                                 (fromMaybe)
@@ -31,6 +32,7 @@ import           Servant.Server.Internal.RoutingApplication (DelayedIO,
                                                              addBodyCheck,
                                                              addMethodCheck,
                                                              addAcceptCheck,
+                                                             passToServer,
                                                              delayedFailFatal,
                                                              runAction,
                                                              withRequest)
@@ -68,15 +70,14 @@ instance ( AllMime contentTypes, HasServer subapi ctx
 instance ( KnownNat status, AllMime contentTypes, ReflectMethod method
          ) => HasServer (StreamResponse method status contentTypes) ctx where
   type ServerT (StreamResponse method status contentTypes) m
-    = m (Stream (Of BS.ByteString) (ResourceT IO) ())
+    = InternalState -> m (Stream (Of BS.ByteString) (ResourceT IO) ())
 
   route _ _ctxt subapi = leafRouter $ \env request respond ->
     let action = subapi `addMethodCheck` methodCheck method request
                         `addAcceptCheck` acceptCheck contentTypeProxy accept
         accept = fromMaybe ct_wildcard $ lookup hAccept $ requestHeaders request
     in bracket createInternalState
-               closeInternalState
-               (runAction action env request respond . streamResponse)
+               closeInternalState $ \st -> (runAction (action `passToServer` (const st)) env request respond (streamResponse st))
     where
       method :: Method
       method = reflectMethod (Proxy :: Proxy method)
@@ -90,5 +91,4 @@ instance ( KnownNat status, AllMime contentTypes, ReflectMethod method
       status :: Status
       status = toEnum $ fromInteger $ natVal (Proxy :: Proxy status)
 
-  hoistServerWithContext _ _ b c
-    = b c
+  hoistServerWithContext = hoistServerWithContext
