@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE UndecidableInstances #-}
 module Servant.Streaming.Server.Internal where
 
 import           Control.Exception                          (bracket)
@@ -21,6 +22,7 @@ import           Network.Wai.Streaming                      (streamingRequest,
                                                              streamingResponse)
 import           Servant                                    hiding (Stream)
 import           Servant.API.ContentTypes                   (AllMime (allMime))
+import           Servant.API.ResponseHeaders                (GetHeaders')
 import           Servant.Server.Internal                    (ct_wildcard,
                                                              methodCheck,
                                                              acceptCheck)
@@ -69,25 +71,53 @@ instance ( KnownNat status, AllMime contentTypes, ReflectMethod method
   type ServerT (StreamResponse method status contentTypes) m
     = m (Stream (Of BS.ByteString) (ResourceT IO) ())
 
-  route _ _ctxt subapi = leafRouter $ \env request respond ->
-    let action = subapi `addMethodCheck` methodCheck method request
-                        `addAcceptCheck` acceptCheck contentTypeProxy accept
+  hoistServerWithContext _ _ b c = b c
+  route _ _ subapi = streamRouter ([],) subapi contentTypeProxy statusProxy method
+    where
+      contentTypeProxy :: Proxy contentTypes
+      contentTypeProxy = Proxy
+
+      statusProxy :: Proxy status
+      statusProxy = Proxy
+
+      method :: Method
+      method = reflectMethod (Proxy :: Proxy method)
+
+
+instance ( KnownNat status, AllMime contentTypes, ReflectMethod method, GetHeaders' hs
+         ) => HasServer (Headers hs (StreamResponse method status contentTypes)) ctx where
+  type ServerT (Headers hs (StreamResponse method status contentTypes)) m
+    = m (Headers hs (Streaming.Stream (Of BS.ByteString) (ResourceT IO) ()))
+
+  hoistServerWithContext _ _ nt s = nt s
+  route _ _ subapi = streamRouter (\x -> (getHeaders x, getResponse x)) subapi contentTypeProxy statusProxy method
+    where
+      contentTypeProxy :: Proxy contentTypes
+      contentTypeProxy = Proxy
+
+      method :: Method
+      method = reflectMethod (Proxy :: Proxy method)
+
+      statusProxy :: Proxy status
+      statusProxy = Proxy
+
+
+-- streamRouter :: _
+streamRouter headersAndResponse subapi contentTypeProxy statusProxy method =
+  leafRouter $ \env request respond ->
+    let
         accept = fromMaybe ct_wildcard $ lookup hAccept $ requestHeaders request
+        action = subapi `addMethodCheck` methodCheck method request
+                        `addAcceptCheck` acceptCheck contentTypeProxy accept
     in bracket createInternalState
                closeInternalState
                (runAction action env request respond . streamResponse)
     where
-      method :: Method
-      method = reflectMethod (Proxy :: Proxy method)
-
-      contentTypeProxy :: Proxy contentTypes
-      contentTypeProxy = Proxy
-
-      streamResponse :: InternalState -> Stream (Of BS.ByteString) (ResourceT IO) () -> RouteResult Response
-      streamResponse st stream = Route $ streamingResponse (hoist (`runInternalState` st) stream) status []
+      -- streamResponse :: InternalState -> _ -> RouteResult Response
+      streamResponse st output =
+        Route $ streamingResponse (hoist (`runInternalState` st) stream) status headers
+        where
+          (headers, stream) = headersAndResponse output
 
       status :: Status
-      status = toEnum $ fromInteger $ natVal (Proxy :: Proxy status)
-
-  hoistServerWithContext _ _ b c
-    = b c
+      status = toEnum $ fromInteger $ natVal statusProxy
